@@ -39,6 +39,12 @@ import getPrivateClickMeasurement from './private_click_measurement'
 import { getWebGlBasics, getWebGlExtensions } from './webgl'
 import getAudioContextBaseLatency from './audio_base_latency'
 import getDateTimeLocale from './date_time_locale'
+// New Safari 17+ compatible sources
+import getScreenMediaQueries from './screen_media_queries'
+import getNetworkInformation from './network_information'
+import getBatteryInfo from './battery'
+import getWebRTCIPs from './webrtc_ips'
+import getTLSFingerprint from './tls_fingerprint'
 
 /**
  * The list of entropy sources used to make visitor identifiers.
@@ -96,6 +102,14 @@ export const sources = {
   privateClickMeasurement: getPrivateClickMeasurement,
   audioBaseLatency: getAudioContextBaseLatency,
   dateTimeLocale: getDateTimeLocale,
+
+  // New Safari 17+ compatible sources - these provide additional entropy
+  // especially useful when standard sources are blocked/noised
+  screenMediaQueries: getScreenMediaQueries,
+  networkInformation: getNetworkInformation,
+  battery: getBatteryInfo,
+  webRTCIPs: getWebRTCIPs,
+  tlsFingerprint: getTLSFingerprint,
 
   // Some sources can affect other sources (e.g. WebGL can affect canvas), so it's important to run these sources
   // after other sources.

@@ -51,3 +51,6 @@ export {
   UnknownSources,
 } from './utils/entropy_source'
 export { withIframe } from './utils/dom'
+
+// TLS fingerprint configuration (requires server-side component)
+export { configureTLSFingerprint } from './sources/tls_fingerprint'

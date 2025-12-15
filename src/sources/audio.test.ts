@@ -6,12 +6,11 @@ describe('Sources', () => {
     it('returns expected value type depending on the browser', async () => {
       const result = getAudioFingerprint()
 
-      if (doesBrowserPerformAntifingerprinting()) {
-        expect(result).toBe(SpecialFingerprint.KnownForAntifingerprinting)
-      } else if (doesBrowserSuspendAudioContext()) {
+      if (doesBrowserSuspendAudioContext()) {
         expect(result).toBe(SpecialFingerprint.KnownForSuspending)
       } else {
-        // A type guard
+        // For all browsers including Safari 17+ (which now uses noise-resistant algorithm),
+        // we expect a function that returns a fingerprint
         if (typeof result !== 'function') {
           throw new Error('Expected to be a function')
         }
@@ -35,6 +34,22 @@ describe('Sources', () => {
       }
 
       expect(await second()).toBe(await first())
+    })
+
+    it('returns stable value on Safari 17+ with noise-resistant algorithm', async () => {
+      if (!doesBrowserPerformAntifingerprinting()) {
+        return // Skip test for non-noisy browsers
+      }
+
+      const result = getAudioFingerprint()
+      if (typeof result !== 'function') {
+        throw new Error('Expected to be a function')
+      }
+
+      // Run multiple times to verify stability despite Safari's noise
+      const fingerprints = await Promise.all([result(), result(), result()])
+      expect(fingerprints[0]).toBe(fingerprints[1])
+      expect(fingerprints[1]).toBe(fingerprints[2])
     })
   })
 })

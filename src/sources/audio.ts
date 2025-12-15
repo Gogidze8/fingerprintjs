@@ -22,11 +22,13 @@ const enum InnerErrorName {
  * Inspired by and based on https://github.com/cozylife/audio-fingerprint
  *
  * A version of the entropy source with stabilization to make it suitable for static fingerprinting.
- * Audio signal is noised in private mode of Safari 17, so audio fingerprinting is skipped in Safari 17.
+ * For Safari 17+ which adds noise, we use multi-sample averaging and significant digit rounding.
+ * @see https://fingerprint.com/blog/bypassing-safari-17-audio-fingerprinting-protection/
  */
 export default function getAudioFingerprint(): number | (() => Promise<number>) {
+  // Use noise-resistant algorithm for Safari 17+ and Samsung Internet 26+
   if (doesBrowserPerformAntifingerprinting()) {
-    return SpecialFingerprint.KnownForAntifingerprinting
+    return getNoiseResistantAudioFingerprint()
   }
 
   return getUnstableAudioFingerprint()
@@ -205,4 +207,130 @@ function makeInnerError(name: InnerErrorName) {
   const error = new Error(name)
   error.name = name
   return error
+}
+
+/**
+ * Number of audio samples to generate for noise cancellation.
+ * More samples = better noise reduction but slower performance.
+ * Safari's noise magnitude is ~0.008%, so 3-5 samples is usually sufficient.
+ */
+const NOISE_CANCELLATION_SAMPLE_COUNT = 4
+
+/**
+ * Number of significant digits to preserve when rounding.
+ * Safari noise is relative (proportional to sample value), not absolute.
+ * 5-6 significant digits preserves uniqueness while eliminating noise.
+ * @see https://fingerprint.com/blog/bypassing-safari-17-audio-fingerprinting-protection/
+ */
+const SIGNIFICANT_DIGITS = 6
+
+/**
+ * Rounds a number to a specified number of significant digits.
+ * This is different from toFixed() which rounds to decimal places.
+ * Safari's noise is relative to the value, so we must use significant digits.
+ */
+function roundToSignificantDigits(value: number, digits: number): number {
+  if (value === 0) return 0
+  const magnitude = Math.floor(Math.log10(Math.abs(value))) + 1
+  const scale = Math.pow(10, digits - magnitude)
+  return Math.round(value * scale) / scale
+}
+
+/**
+ * Creates a single audio sample using OfflineAudioContext.
+ * Each call creates a new context, which gets fresh noise from Safari.
+ */
+async function generateSingleAudioSample(): Promise<Float32Array | null> {
+  const w = window
+  const AudioContext = w.OfflineAudioContext || w.webkitOfflineAudioContext
+  if (!AudioContext) {
+    return null
+  }
+
+  const hashFromIndex = 4500
+  const hashToIndex = 5000
+  const context = new AudioContext(1, hashToIndex, 44100)
+
+  const oscillator = context.createOscillator()
+  oscillator.type = 'triangle'
+  oscillator.frequency.value = 10000
+
+  const compressor = context.createDynamicsCompressor()
+  compressor.threshold.value = -50
+  compressor.knee.value = 40
+  compressor.ratio.value = 12
+  compressor.attack.value = 0
+  compressor.release.value = 0.25
+
+  oscillator.connect(compressor)
+  compressor.connect(context.destination)
+  oscillator.start(0)
+
+  try {
+    const buffer = await context.startRendering()
+    return buffer.getChannelData(0).subarray(hashFromIndex)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Noise-resistant audio fingerprinting for Safari 17+ and Samsung Internet 26+.
+ *
+ * Safari 17 adds uniform random noise to each audio sample within ±0.008% of the value.
+ * This algorithm defeats the noise by:
+ * 1. Generating multiple independent audio samples (each gets different noise)
+ * 2. Averaging the samples to reduce noise dispersion (√n reduction)
+ * 3. Rounding to significant digits to eliminate remaining noise
+ *
+ * @see https://fingerprint.com/blog/bypassing-safari-17-audio-fingerprinting-protection/
+ */
+function getNoiseResistantAudioFingerprint(): number | (() => Promise<number>) {
+  const w = window
+  const AudioContext = w.OfflineAudioContext || w.webkitOfflineAudioContext
+  if (!AudioContext) {
+    return SpecialFingerprint.NotSupported
+  }
+
+  if (doesBrowserSuspendAudioContext()) {
+    return SpecialFingerprint.KnownForSuspending
+  }
+
+  return async () => {
+    // Generate multiple audio samples - each gets independent noise from Safari
+    const samplePromises: Promise<Float32Array | null>[] = []
+    for (let i = 0; i < NOISE_CANCELLATION_SAMPLE_COUNT; i++) {
+      samplePromises.push(generateSingleAudioSample())
+    }
+
+    const samples = await Promise.all(samplePromises)
+    const validSamples = samples.filter((s): s is Float32Array => s !== null)
+
+    if (validSamples.length === 0) {
+      return SpecialFingerprint.NotSupported
+    }
+
+    // Average the samples to reduce noise dispersion
+    // With uniform noise, averaging n samples reduces standard deviation by √n
+    const sampleLength = validSamples[0].length
+    const averagedSignal = new Float32Array(sampleLength)
+
+    for (let i = 0; i < sampleLength; i++) {
+      let sum = 0
+      for (const sample of validSamples) {
+        sum += sample[i]
+      }
+      averagedSignal[i] = sum / validSamples.length
+    }
+
+    // Compute hash from averaged signal
+    let hash = 0
+    for (let i = 0; i < averagedSignal.length; i++) {
+      hash += Math.abs(averagedSignal[i])
+    }
+
+    // Round to significant digits to eliminate remaining noise
+    // This is the key insight: noise is relative, so use significant digits not decimal places
+    return roundToSignificantDigits(hash, SIGNIFICANT_DIGITS)
+  }
 }

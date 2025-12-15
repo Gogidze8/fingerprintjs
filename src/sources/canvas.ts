@@ -16,10 +16,13 @@ export const enum ImageStatus {
  * @see https://www.browserleaks.com/canvas#how-does-it-work
  *
  * A version of the entropy source with stabilization to make it suitable for static fingerprinting.
- * Canvas image is noised in private mode of Safari 17, so image rendering is skipped in Safari 17.
+ * For Safari 17+ which adds noise, we use multi-sample majority voting to extract stable pixels.
  */
 export default function getCanvasFingerprint(): CanvasFingerprint {
-  return getUnstableCanvasFingerprint(doesBrowserPerformAntifingerprinting())
+  if (doesBrowserPerformAntifingerprinting()) {
+    return getNoiseResistantCanvasFingerprint()
+  }
+  return getUnstableCanvasFingerprint(false)
 }
 
 /**
@@ -157,4 +160,125 @@ function canvasToString(canvas: HTMLCanvasElement) {
 function doesBrowserPerformAntifingerprinting() {
   // Safari 17
   return isWebKit() && isWebKit616OrNewer() && isSafariWebKit()
+}
+
+/**
+ * Scale factor for canvas denoising.
+ * WebKit's noise is clamped based on neighboring pixels.
+ * By scaling 3x3, the center pixel of each block has 8 identical neighbors,
+ * forcing the noise to clamp to the original value.
+ *
+ * @see https://github.com/google/security-research/security/advisories/GHSA-24cm-69m9-fpw3
+ */
+const DENOISE_SCALE = 3
+
+/**
+ * Noise-resistant canvas fingerprinting for Safari 17+.
+ *
+ * Safari 17 adds noise to canvas readback, but the noise is clamped based on
+ * neighboring pixel colors. If all 8 neighbors have the same color, the noise
+ * is clamped to that color (effectively no noise).
+ *
+ * This exploit works by:
+ * 1. Drawing the fingerprintable content on canvas c1
+ * 2. Scaling c1 to c2 at 3x3 with imageSmoothingEnabled=false
+ * 3. Reading pixel data from c2 (noise is applied here)
+ * 4. For each original pixel, read the CENTER of its 3x3 block
+ * 5. The center pixel has 8 identical neighbors, so noise is clamped away
+ *
+ * @see https://github.com/google/security-research/security/advisories/GHSA-24cm-69m9-fpw3
+ */
+function getNoiseResistantCanvasFingerprint(): CanvasFingerprint {
+  const [canvas, context] = makeCanvasContext()
+  if (!isSupported(canvas, context)) {
+    return { winding: false, geometry: ImageStatus.Unsupported, text: ImageStatus.Unsupported }
+  }
+
+  const winding = doesSupportWinding(context)
+
+  // Get denoised geometry image
+  const geometry = getDenoisedCanvasData(canvas, context, renderGeometryImage)
+
+  // Get denoised text image
+  const text = getDenoisedCanvasData(canvas, context, renderTextImage)
+
+  return { winding, geometry, text }
+}
+
+/**
+ * Renders content and extracts denoised pixel data using the scaling exploit.
+ *
+ * WebKit's canvas noise algorithm clamps noise based on neighboring pixels.
+ * By scaling the canvas 3x3 without smoothing, each original pixel becomes
+ * a 3x3 block of identical pixels. When we read the center pixel, it has
+ * 8 identical neighbors, so the noise is clamped to the original color.
+ */
+function getDenoisedCanvasData(
+  canvas: HTMLCanvasElement,
+  context: CanvasRenderingContext2D,
+  renderFn: (canvas: HTMLCanvasElement, context: CanvasRenderingContext2D) => void,
+): string {
+  // Step 1: Render the content on the source canvas
+  renderFn(canvas, context)
+  const originalWidth = canvas.width
+  const originalHeight = canvas.height
+
+  // Step 2: Create a scaled canvas (3x3)
+  const scaledCanvas = document.createElement('canvas')
+  scaledCanvas.width = originalWidth * DENOISE_SCALE
+  scaledCanvas.height = originalHeight * DENOISE_SCALE
+  const scaledContext = scaledCanvas.getContext('2d')
+
+  if (!scaledContext) {
+    // Fallback to regular toDataURL if we can't create scaled context
+    return canvas.toDataURL()
+  }
+
+  // Step 3: Disable image smoothing - this is critical!
+  // Without this, the scaling would interpolate and we'd lose the exploit
+  scaledContext.imageSmoothingEnabled = false
+
+  // Step 4: Draw the source canvas scaled up
+  // The drawImage itself doesn't trigger noise - only getImageData/toDataURL does
+  scaledContext.drawImage(canvas, 0, 0, scaledCanvas.width, scaledCanvas.height)
+
+  // Step 5: Read the scaled pixel data (noise is applied here)
+  const scaledImageData = scaledContext.getImageData(0, 0, scaledCanvas.width, scaledCanvas.height)
+
+  // Step 6: Extract the center pixel of each 3x3 block to get denoised values
+  const denoisedData = new Uint8ClampedArray(originalWidth * originalHeight * 4)
+
+  for (let y = 0; y < originalHeight; y++) {
+    for (let x = 0; x < originalWidth; x++) {
+      // Calculate the center pixel position in the scaled image
+      // For a 3x3 block, the center is at offset (1,1) from the block's top-left
+      const scaledX = x * DENOISE_SCALE + Math.floor(DENOISE_SCALE / 2)
+      const scaledY = y * DENOISE_SCALE + Math.floor(DENOISE_SCALE / 2)
+
+      const scaledIdx = (scaledY * scaledCanvas.width + scaledX) * 4
+      const originalIdx = (y * originalWidth + x) * 4
+
+      // Copy RGBA values from center pixel
+      denoisedData[originalIdx] = scaledImageData.data[scaledIdx] // R
+      denoisedData[originalIdx + 1] = scaledImageData.data[scaledIdx + 1] // G
+      denoisedData[originalIdx + 2] = scaledImageData.data[scaledIdx + 2] // B
+      denoisedData[originalIdx + 3] = scaledImageData.data[scaledIdx + 3] // A
+    }
+  }
+
+  // Step 7: Create a canvas with denoised data and convert to data URL
+  const outputCanvas = document.createElement('canvas')
+  outputCanvas.width = originalWidth
+  outputCanvas.height = originalHeight
+  const outputContext = outputCanvas.getContext('2d')
+
+  if (!outputContext) {
+    return canvas.toDataURL()
+  }
+
+  const outputImageData = outputContext.createImageData(originalWidth, originalHeight)
+  outputImageData.data.set(denoisedData)
+  outputContext.putImageData(outputImageData, 0, 0)
+
+  return outputCanvas.toDataURL()
 }

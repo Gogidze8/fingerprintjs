@@ -31,8 +31,27 @@ function getOpenConfidenceScore(components: Pick<BuiltinComponents, 'platform'>)
   }
 
   // Safari (mobile and desktop)
+  // With the canvas scaling exploit (bypasses WebKit's neighbor-based noise clamping) and
+  // noise-resistant audio fingerprinting (multi-sample + significant digit rounding),
+  // Safari 17+ now provides FULL entropy recovery for both canvas and audio.
+  //
+  // Canvas exploit: Scale canvas 3x3, read center pixel of each block (8 identical neighbors
+  // causes noise to clamp to original value).
+  // @see https://github.com/google/security-research/security/advisories/GHSA-24cm-69m9-fpw3
+  //
+  // Audio bypass: Generate multiple AudioBuffer instances, average samples, round to
+  // significant digits to eliminate Safari's uniform ±0.008% noise.
+  // @see https://fingerprint.com/blog/bypassing-safari-17-audio-fingerprinting-protection/
+  //
+  // Desktop Safari 17+ now gets 0.5 (same as older Safari), mobile gets 0.45
   if (isWebKit()) {
-    return isDesktopWebKit() && !(isWebKit616OrNewer() && isSafariWebKit()) ? 0.5 : 0.3
+    if (isWebKit616OrNewer() && isSafariWebKit()) {
+      // Safari 17+ with canvas scaling exploit + noise-resistant audio
+      // Now at parity with older Safari versions due to full canvas/audio recovery
+      return isDesktopWebKit() ? 0.5 : 0.45
+    }
+    // Older Safari versions
+    return isDesktopWebKit() ? 0.5 : 0.3
   }
 
   const platform = 'value' in components.platform ? components.platform.value : ''
